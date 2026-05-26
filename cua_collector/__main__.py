@@ -1,4 +1,6 @@
 import argparse
+import logging
+import os
 import signal
 import sys
 import time
@@ -7,15 +9,74 @@ from pathlib import Path
 from .session import Collector
 from .config import CONFIG_PATH
 
+logger = logging.getLogger(__name__)
+
+PID_FILE = Path.home() / ".cua-collector" / "collector.pid"
+
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+}
+
+
+def _setup_logging(level: str = "INFO"):
+    logging.basicConfig(
+        level=_LOG_LEVELS.get(level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def _write_pid():
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()))
+    logger.debug("PID %d written to %s", os.getpid(), PID_FILE)
+
+
+def _remove_pid():
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_pid() -> int | None:
+    if PID_FILE.exists():
+        try:
+            return int(PID_FILE.read_text().strip())
+        except (ValueError, OSError):
+            return None
+    return None
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
 
 def cmd_start(args):
+    _setup_logging(args.log_level)
+
+    existing_pid = _read_pid()
+    if existing_pid and _is_pid_alive(existing_pid):
+        print(f"A collector is already running (PID {existing_pid})")
+        sys.exit(1)
+
     collector = Collector()
     session = collector.start()
+    _write_pid()
+
     print(f"Session started: {session.session_id}")
     print(f"Output: {session.session_dir}")
     print("Press Ctrl+C to stop recording")
 
     def shutdown():
+        _remove_pid()
         if collector.is_running:
             collector.stop()
             print(f"\nSession saved to {session.session_dir}")
@@ -24,16 +85,22 @@ def cmd_start(args):
     signal.signal(signal.SIGINT, lambda s, f: shutdown())
     signal.signal(signal.SIGTERM, lambda s, f: shutdown())
 
-    while collector.is_running:
-        time.sleep(1)
+    try:
+        while collector.is_running:
+            if (collector.active_session
+                    and collector.active_session._stop_requested):
+                collector.stop()
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        shutdown()
+    else:
+        _remove_pid()
 
 
 def cmd_status(args):
-    collector = Collector()
-    if collector.is_running:
-        session = collector.active_session
-        print(f"Active session: {session.session_id}")
-        print(f"Directory: {session.session_dir}")
+    pid = _read_pid()
+    if pid and _is_pid_alive(pid):
+        print(f"Collector running (PID {pid})")
     else:
         print("No active session")
 
@@ -70,8 +137,12 @@ def cmd_config_set(args):
             pass
 
     target[parts[-1]] = val
-    save_config(config)
-    print(f"Set {args.key} = {val}")
+    try:
+        save_config(config)
+        print(f"Set {args.key} = {val}")
+    except ValueError as e:
+        print(f"Config rejected: {e}")
+        sys.exit(1)
 
 
 def cmd_info(args):
@@ -95,6 +166,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="CUA Dataset Collector - Record macOS interactions for CUA training"
     )
+    parser.add_argument(
+        "--log-level", default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set logging level (default: INFO)",
+    )
+
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("start", help="Start a new recording session")

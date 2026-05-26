@@ -1,7 +1,14 @@
-import time
+import hashlib
+import logging
 import threading
+import time
 from typing import Optional, Callable
+
 from ..models import make_observation, CaptureEvent
+
+logger = logging.getLogger(__name__)
+
+_TREE_FINGERPRINT_BYTES = 10000
 
 
 class AccessibilityCapture:
@@ -21,6 +28,7 @@ class AccessibilityCapture:
             return
         self._running = True
         self._thread = threading.Thread(target=self._a11y_loop, daemon=True)
+        self._thread.name = "cua-a11y-capture"
         self._thread.start()
 
     def stop(self):
@@ -30,31 +38,39 @@ class AccessibilityCapture:
 
     def _a11y_loop(self):
         while self._running:
-            try:
-                tree = self._capture_tree()
-                if tree is None:
-                    time.sleep(2)
-                    continue
+            import objc
+            with objc.autorelease_pool():
+                try:
+                    tree = self._capture_tree()
+                    if tree is None:
+                        time.sleep(2)
+                        continue
 
-                should_capture = True
-                if self.config.get("capture_on_change_only", True):
-                    tree_hash = hash(str(tree)[:10000])
-                    if tree_hash == self._last_tree_hash:
-                        should_capture = False
-                    else:
-                        self._last_tree_hash = tree_hash
+                    should_capture = True
+                    if self.config.get("capture_on_change_only", True):
+                        fp = self._fingerprint(tree)
+                        if fp == self._last_tree_hash:
+                            should_capture = False
+                        else:
+                            self._last_tree_hash = fp
 
-                if should_capture:
-                    event = make_observation(
-                        timestamp=time.time(),
-                        session_id=self.get_session_id(),
-                        sequence_id=self.get_sequence_id(),
-                        accessibility_tree=tree,
-                    )
-                    self.callback(event)
-            except Exception:
-                pass
-            time.sleep(2)
+                    if should_capture:
+                        event = make_observation(
+                            timestamp=time.time(),
+                            session_id=self.get_session_id(),
+                            sequence_id=self.get_sequence_id(),
+                            accessibility_tree=tree,
+                        )
+                        self.callback(event)
+                except Exception:
+                    logger.exception("a11y capture failed")
+                time.sleep(2)
+
+    @staticmethod
+    def _fingerprint(tree: dict) -> str:
+        serialized = str(tree)
+        truncated = serialized.encode("utf-8")[:_TREE_FINGERPRINT_BYTES]
+        return hashlib.md5(truncated, usedforsecurity=False).hexdigest()
 
     def _capture_tree(self) -> Optional[dict]:
         try:
@@ -68,6 +84,7 @@ class AccessibilityCapture:
 
             return self._get_element_info(focused_app, depth=0)
         except Exception:
+            logger.exception("a11y tree capture failed")
             return None
 
     def _get_element_info(self, element, depth=0) -> Optional[dict]:
@@ -106,13 +123,17 @@ class AccessibilityCapture:
             if not err and focused is not None:
                 info["focused"] = bool(focused)
 
-            err, pos = ax.AXUIElementCopyAttributeValue(element, "AXPosition", None)
-            if not err and pos:
-                info["position"] = {"x": pos.x, "y": pos.y}
+            err, pos_val = ax.AXUIElementCopyAttributeValue(element, "AXPosition", None)
+            if not err and pos_val:
+                success, point = ax.AXValueGetValue(pos_val, ax.kAXValueCGPointType, None)
+                if success:
+                    info["position"] = {"x": point.x, "y": point.y}
 
-            err, size = ax.AXUIElementCopyAttributeValue(element, "AXSize", None)
-            if not err and size:
-                info["size"] = {"w": size.width, "h": size.height}
+            err, size_val = ax.AXUIElementCopyAttributeValue(element, "AXSize", None)
+            if not err and size_val:
+                success, size = ax.AXValueGetValue(size_val, ax.kAXValueCGSizeType, None)
+                if success:
+                    info["size"] = {"w": size.width, "h": size.height}
 
             children = []
             err, child_refs = ax.AXUIElementCopyAttributeValue(element, "AXChildren", None)
@@ -125,7 +146,7 @@ class AccessibilityCapture:
                 info["children"] = children
 
         except Exception:
-            pass
+            logger.debug("a11y element info failed", exc_info=True)
 
         return info
 

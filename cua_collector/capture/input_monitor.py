@@ -1,8 +1,12 @@
-import time
+import logging
 import random
 import threading
+import time
 from typing import Optional, Callable
+
 from ..models import make_action, ActionType, CaptureEvent
+
+logger = logging.getLogger(__name__)
 
 _KEY_MAP = {
     0: "a", 1: "s", 2: "d", 3: "f", 4: "h", 5: "g", 6: "z", 7: "x",
@@ -28,6 +32,7 @@ _KEY_MAP = {
 }
 
 _TEXT_INPUT_TIMEOUT = 0.4
+_MAX_TEXT_BUFFER = 10000
 
 
 class InputMonitor:
@@ -50,10 +55,12 @@ class InputMonitor:
             return
         self._running = True
         self._thread = threading.Thread(target=self._run_event_tap, daemon=True)
+        self._thread.name = "cua-input-monitor"
         self._thread.start()
         self._text_flush_thread = threading.Thread(
             target=self._text_flush_loop, daemon=True
         )
+        self._text_flush_thread.name = "cua-text-flush"
         self._text_flush_thread.start()
 
     def stop(self):
@@ -93,6 +100,10 @@ class InputMonitor:
         )
 
         if self._tap is None:
+            logger.error(
+                "CGEventTapCreate returned None — missing Input Monitoring permission. "
+                "Grant it in System Settings > Privacy & Security > Input Monitoring"
+            )
             return
 
         self._run_loop_ref = Quartz.CFRunLoopGetCurrent()
@@ -105,97 +116,102 @@ class InputMonitor:
         Quartz.CFRunLoopRun()
 
     def _handle_event(self, proxy, event_type, event, user_info):
-        if not self._running:
-            return event
+        import objc
+        with objc.autorelease_pool():
+            if not self._running:
+                return event
 
-        import Quartz
-        timestamp = time.time()
-        event_type_name = Quartz.CGEventGetType(event)
+            import Quartz
+            timestamp = time.time()
+            event_type_name = Quartz.CGEventGetType(event)
 
-        try:
-            if event_type_name == Quartz.kCGEventMouseMoved:
-                sample_rate = self.config.get("mouse_move_sample_rate", 0.1)
-                if random.random() > sample_rate:
-                    return event
+            try:
+                if event_type_name == Quartz.kCGEventMouseMoved:
+                    sample_rate = self.config.get("mouse_move_sample_rate", 0.1)
+                    if random.random() > sample_rate:
+                        return event
 
-            location = Quartz.CGEventGetLocation(event)
-            pos = round(location.x, 1), round(location.y, 1)
-            modifiers = self._get_modifiers(event)
-            session_id = self.get_session_id()
-            seq = self.get_sequence_id()
+                location = Quartz.CGEventGetLocation(event)
+                pos = round(location.x, 1), round(location.y, 1)
+                modifiers = self._get_modifiers(event)
+                session_id = self.get_session_id()
+                seq = self.get_sequence_id()
 
-            if event_type_name in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventRightMouseDown):
-                button = "left" if event_type_name == Quartz.kCGEventLeftMouseDown else "right"
-                self.callback(make_action(
-                    timestamp=timestamp, session_id=session_id, sequence_id=seq,
-                    action_type=ActionType.MOUSE_CLICK, position=pos,
-                    button=button, modifiers=modifiers,
-                ))
+                if event_type_name in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventRightMouseDown):
+                    button = "left" if event_type_name == Quartz.kCGEventLeftMouseDown else "right"
+                    self.callback(make_action(
+                        timestamp=timestamp, session_id=session_id, sequence_id=seq,
+                        action_type=ActionType.MOUSE_CLICK, position=pos,
+                        button=button, modifiers=modifiers,
+                    ))
 
-            elif event_type_name in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventRightMouseUp):
-                button = "left" if event_type_name == Quartz.kCGEventLeftMouseUp else "right"
-                self.callback(make_action(
-                    timestamp=timestamp, session_id=session_id, sequence_id=seq,
-                    action_type=ActionType.MOUSE_CLICK, position=pos,
-                    button=button, modifiers=modifiers,
-                ))
+                elif event_type_name in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventRightMouseUp):
+                    button = "left" if event_type_name == Quartz.kCGEventLeftMouseUp else "right"
+                    self.callback(make_action(
+                        timestamp=timestamp, session_id=session_id, sequence_id=seq,
+                        action_type=ActionType.MOUSE_CLICK, position=pos,
+                        button=button, modifiers=modifiers,
+                    ))
 
-            elif event_type_name in (Quartz.kCGEventLeftMouseDragged, Quartz.kCGEventRightMouseDragged):
-                button = "left" if event_type_name == Quartz.kCGEventLeftMouseDragged else "right"
-                self.callback(make_action(
-                    timestamp=timestamp, session_id=session_id, sequence_id=seq,
-                    action_type=ActionType.MOUSE_DRAG, position=pos,
-                    button=button, modifiers=modifiers,
-                ))
+                elif event_type_name in (Quartz.kCGEventLeftMouseDragged, Quartz.kCGEventRightMouseDragged):
+                    button = "left" if event_type_name == Quartz.kCGEventLeftMouseDragged else "right"
+                    self.callback(make_action(
+                        timestamp=timestamp, session_id=session_id, sequence_id=seq,
+                        action_type=ActionType.MOUSE_DRAG, position=pos,
+                        button=button, modifiers=modifiers,
+                    ))
 
-            elif event_type_name == Quartz.kCGEventMouseMoved:
-                self.callback(make_action(
-                    timestamp=timestamp, session_id=session_id, sequence_id=seq,
-                    action_type=ActionType.MOUSE_MOVE, position=pos,
-                    modifiers=modifiers,
-                ))
+                elif event_type_name == Quartz.kCGEventMouseMoved:
+                    self.callback(make_action(
+                        timestamp=timestamp, session_id=session_id, sequence_id=seq,
+                        action_type=ActionType.MOUSE_MOVE, position=pos,
+                        modifiers=modifiers,
+                    ))
 
-            elif event_type_name == Quartz.kCGEventKeyDown:
-                key_code = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
-                key = self._key_code_to_str(key_code)
-                self.callback(make_action(
-                    timestamp=timestamp, session_id=session_id, sequence_id=seq,
-                    action_type=ActionType.KEY_PRESS, key=key, key_code=key_code,
-                    modifiers=modifiers,
-                ))
-                self._buffer_key(key, modifiers)
+                elif event_type_name == Quartz.kCGEventKeyDown:
+                    key_code = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+                    key = self._key_code_to_str(key_code)
+                    self.callback(make_action(
+                        timestamp=timestamp, session_id=session_id, sequence_id=seq,
+                        action_type=ActionType.KEY_PRESS, key=key, key_code=key_code,
+                        modifiers=modifiers,
+                    ))
+                    self._buffer_key(key, modifiers)
 
-            elif event_type_name == Quartz.kCGEventKeyUp:
-                key_code = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
-                key = self._key_code_to_str(key_code)
-                self.callback(make_action(
-                    timestamp=timestamp, session_id=session_id, sequence_id=seq,
-                    action_type=ActionType.KEY_RELEASE, key=key, key_code=key_code,
-                    modifiers=modifiers,
-                ))
+                elif event_type_name == Quartz.kCGEventKeyUp:
+                    key_code = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+                    key = self._key_code_to_str(key_code)
+                    self.callback(make_action(
+                        timestamp=timestamp, session_id=session_id, sequence_id=seq,
+                        action_type=ActionType.KEY_RELEASE, key=key, key_code=key_code,
+                        modifiers=modifiers,
+                    ))
 
-            elif event_type_name == Quartz.kCGEventFlagsChanged:
-                self.callback(make_action(
-                    timestamp=timestamp, session_id=session_id, sequence_id=seq,
-                    action_type=ActionType.MODIFIER_CHANGE, modifiers=modifiers,
-                ))
+                elif event_type_name == Quartz.kCGEventFlagsChanged:
+                    self.callback(make_action(
+                        timestamp=timestamp, session_id=session_id, sequence_id=seq,
+                        action_type=ActionType.MODIFIER_CHANGE, modifiers=modifiers,
+                    ))
 
-            elif event_type_name == Quartz.kCGEventScrollWheel:
-                delta_y = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGScrollWheelEventDeltaAxis1)
-                delta_x = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGScrollWheelEventDeltaAxis2)
-                self.callback(make_action(
-                    timestamp=timestamp, session_id=session_id, sequence_id=seq,
-                    action_type=ActionType.SCROLL, position=pos,
-                    delta_x=delta_x, delta_y=delta_y, modifiers=modifiers,
-                ))
+                elif event_type_name == Quartz.kCGEventScrollWheel:
+                    delta_y = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGScrollWheelEventDeltaAxis1)
+                    delta_x = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGScrollWheelEventDeltaAxis2)
+                    self.callback(make_action(
+                        timestamp=timestamp, session_id=session_id, sequence_id=seq,
+                        action_type=ActionType.SCROLL, position=pos,
+                        delta_x=delta_x, delta_y=delta_y, modifiers=modifiers,
+                    ))
 
-        except Exception:
-            pass
+            except Exception:
+                logger.exception("event tap handler failed")
 
         return event
 
     def _buffer_key(self, key: str, modifiers: list):
         with self._text_lock:
+            if len(self._text_buffer) >= _MAX_TEXT_BUFFER:
+                return
+
             printable = (
                 len(key) == 1 and key.isprintable()
                 and "command" not in modifiers

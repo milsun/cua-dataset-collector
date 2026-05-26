@@ -1,7 +1,11 @@
-import time
+import logging
 import threading
+import time
 from typing import Optional, Callable
+
 from ..models import make_system_event, SystemEventType, CaptureEvent
+
+logger = logging.getLogger(__name__)
 
 
 class WindowTracker:
@@ -25,6 +29,7 @@ class WindowTracker:
         self._running = True
         self._known_pids, self._pid_info = self._get_running_pids()
         self._thread = threading.Thread(target=self._track_loop, daemon=True)
+        self._thread.name = "cua-window-tracker"
         self._thread.start()
 
     def stop(self):
@@ -38,7 +43,7 @@ class WindowTracker:
                 self._check_active_window()
                 self._check_app_events()
             except Exception:
-                pass
+                logger.exception("window tracking loop failed")
             time.sleep(1)
 
     def _check_app_events(self):
@@ -82,7 +87,7 @@ class WindowTracker:
                         },
                     ))
         except Exception:
-            pass
+            logger.exception("app event check failed")
 
     def _get_running_pids(self) -> tuple[set, dict]:
         import AppKit
@@ -97,7 +102,7 @@ class WindowTracker:
                     "bundle_id": app.bundleIdentifier(),
                 }
         except Exception:
-            pass
+            logger.exception("failed to get running PIDs")
         return pids, info
 
     def _check_active_window(self):
@@ -173,7 +178,7 @@ class WindowTracker:
                     if not err_t and title:
                         return title
         except Exception:
-            pass
+            logger.exception("AX window title lookup failed")
         return None
 
     def _get_window_title_cg(self, pid: int) -> Optional[str]:
@@ -196,7 +201,7 @@ class WindowTracker:
                     if owner:
                         return owner
         except Exception:
-            pass
+            logger.exception("CG window title lookup failed")
         return None
 
     def get_current_window_info(self) -> Optional[dict]:

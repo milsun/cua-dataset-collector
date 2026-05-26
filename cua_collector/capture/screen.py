@@ -1,3 +1,4 @@
+import logging
 import time
 import threading
 from typing import Optional, Callable
@@ -7,19 +8,24 @@ import Quartz
 
 from ..models import make_observation, CaptureEvent
 
+logger = logging.getLogger(__name__)
+
 
 class ScreenCapture:
     def __init__(self, config: dict, callback: Callable[[CaptureEvent], None],
-                 save_screenshot_fn: Callable[[bytes], str]):
+                 save_screenshot_fn: Callable[[bytes], str],
+                 throttle_fn: Optional[Callable[[], float]] = None):
         self.config = config["capture"]["screenshot"]
         self.callback = callback
         self.save_screenshot = save_screenshot_fn
+        self._throttle_fn = throttle_fn
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
     def start(self):
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.name = "cua-screen-capture"
         self._thread.start()
 
     def stop(self):
@@ -29,16 +35,22 @@ class ScreenCapture:
 
     def _capture_loop(self):
         while self._running:
-            start = time.time()
-            try:
-                event = self._capture_screenshot()
-                if event:
-                    self.callback(event)
-            except Exception:
-                pass
-            elapsed = time.time() - start
-            sleep_for = max(0, self.config["interval_seconds"] - elapsed)
-            time.sleep(sleep_for)
+            import objc
+            with objc.autorelease_pool():
+                start = time.time()
+                try:
+                    event = self._capture_screenshot()
+                    if event:
+                        self.callback(event)
+                except Exception:
+                    logger.exception("screenshot capture failed")
+                elapsed = time.time() - start
+                base_interval = self.config["interval_seconds"]
+                if self._throttle_fn:
+                    base_interval *= self._throttle_fn()
+                sleep_for = max(0, base_interval - elapsed)
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
 
     def _capture_screenshot(self) -> Optional[CaptureEvent]:
         try:
@@ -74,6 +86,7 @@ class ScreenCapture:
                 screenshot_path=screenshot_rel_path,
             )
         except Exception:
+            logger.exception("screenshot capture failed")
             return None
 
 

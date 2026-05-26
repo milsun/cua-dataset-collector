@@ -4,6 +4,7 @@ import threading
 import time
 from typing import Optional, Callable
 
+import AppKit
 from ..models import make_action, ActionType, CaptureEvent
 
 logger = logging.getLogger(__name__)
@@ -46,9 +47,13 @@ class InputMonitor:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._run_loop_ref = None
+        self._tap = None
         self._text_buffer: list[str] = []
         self._last_key_time = 0.0
         self._text_lock = threading.Lock()
+        self._last_event_time = 0.0
+        self._tap_recoveries = 0
+        self._wake_observer = None
 
     def start(self):
         if not self.config["enabled"]:
@@ -65,13 +70,22 @@ class InputMonitor:
 
     def stop(self):
         self._running = False
+        if self._wake_observer is not None:
+            AppKit.NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self._wake_observer)
+            self._wake_observer = None
         if self._run_loop_ref is not None:
             import Quartz
             Quartz.CFRunLoopStop(self._run_loop_ref)
             self._run_loop_ref = None
         self._flush_text_buffer()
 
-    def _run_event_tap(self):
+    @property
+    def seconds_since_last_event(self) -> float:
+        if self._last_event_time == 0:
+            return -1
+        return time.time() - self._last_event_time
+
+    def _create_tap(self):
         import Quartz
 
         event_mask = 0
@@ -90,7 +104,7 @@ class InputMonitor:
         event_mask |= Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
         event_mask |= Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
 
-        self._tap = Quartz.CGEventTapCreate(
+        tap = Quartz.CGEventTapCreate(
             Quartz.kCGHIDEventTap,
             Quartz.kCGHeadInsertEventTap,
             0,
@@ -99,11 +113,18 @@ class InputMonitor:
             None,
         )
 
-        if self._tap is None:
+        if tap is None:
             logger.error(
                 "CGEventTapCreate returned None — missing Input Monitoring permission. "
                 "Grant it in System Settings > Privacy & Security > Input Monitoring"
             )
+        return tap
+
+    def _run_event_tap(self):
+        import Quartz
+
+        self._tap = self._create_tap()
+        if self._tap is None:
             return
 
         self._run_loop_ref = Quartz.CFRunLoopGetCurrent()
@@ -113,16 +134,53 @@ class InputMonitor:
             self._run_loop_source,
             Quartz.kCFRunLoopDefaultMode,
         )
+
+        self._wake_observer = AppKit.NSWorkspace.sharedWorkspace().notificationCenter().addObserverForName_object_queue_usingBlock_(
+            AppKit.NSWorkspaceDidWakeNotification,
+            None,
+            None,
+            lambda note: self._handle_wake(),
+        )
+
         Quartz.CFRunLoopRun()
+
+    def _handle_wake(self):
+        logger.info("System woke from sleep, re-creating event tap")
+        import Quartz
+        if self._tap is not None:
+            Quartz.CFRunLoopRemoveSource(
+                self._run_loop_ref,
+                self._run_loop_source,
+                Quartz.kCFRunLoopDefaultMode,
+            )
+        self._tap = self._create_tap()
+        if self._tap is not None:
+            self._run_loop_source = Quartz.CFMachPortCreateRunLoopSource(None, self._tap, 0)
+            Quartz.CFRunLoopAddSource(
+                self._run_loop_ref,
+                self._run_loop_source,
+                Quartz.kCFRunLoopDefaultMode,
+            )
 
     def _handle_event(self, proxy, event_type, event, user_info):
         import objc
         with objc.autorelease_pool():
+            import Quartz
+            disabled_by_timeout = getattr(Quartz, 'kCGEventTapDisabledByTimeout', 0xFFFFFFFE)
+            disabled_by_input = getattr(Quartz, 'kCGEventTapDisabledByUserInput', 0xFFFFFFFF)
+
+            if event_type in (disabled_by_timeout, disabled_by_input):
+                logger.warning(
+                    "Event tap disabled (code %d), re-enabling", event_type
+                )
+                Quartz.CGEventTapEnable(self._tap, True)
+                self._tap_recoveries += 1
+                return event
+
             if not self._running:
                 return event
 
-            import Quartz
-            timestamp = time.time()
+            self._last_event_time = time.time()
             event_type_name = Quartz.CGEventGetType(event)
 
             try:

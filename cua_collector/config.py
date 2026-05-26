@@ -19,8 +19,10 @@ DEFAULT_CONFIG = {
         "screenshot": {
             "enabled": True,
             "interval_seconds": 1.0,
-            "max_width": 1440,
+            "max_width": 1280,
             "max_screenshots": 50000,
+            "format": "png",
+            "jpeg_quality": 85,
         },
         "accessibility_tree": {
             "enabled": True,
@@ -78,6 +80,14 @@ def _validate_config(config: dict):
     max_ss = sc.get("max_screenshots", 50000)
     if not isinstance(max_ss, int) or max_ss < 100:
         errors.append("capture.screenshot.max_screenshots must be >= 100")
+
+    fmt = sc.get("format", "png")
+    if fmt not in ("png", "jpeg"):
+        errors.append("capture.screenshot.format must be 'png' or 'jpeg'")
+
+    jpeg_q = sc.get("jpeg_quality", 85)
+    if not isinstance(jpeg_q, int) or jpeg_q < 1 or jpeg_q > 100:
+        errors.append("capture.screenshot.jpeg_quality must be 1-100")
 
     max_w = sc.get("max_width", 0)
     if max_w and (not isinstance(max_w, int) or max_w < 320):

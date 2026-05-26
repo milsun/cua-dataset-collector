@@ -6,6 +6,12 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from PyObjCTools import AppHelper
+    _HAVE_MACH_SIGNALS = True
+except ImportError:
+    _HAVE_MACH_SIGNALS = False
+
 from .session import Collector
 from .config import CONFIG_PATH
 
@@ -82,6 +88,8 @@ def cmd_start(args):
             print(f"\nSession saved to {session.session_dir}")
         sys.exit(0)
 
+    if _HAVE_MACH_SIGNALS:
+        AppHelper.installMachInterrupt()
     signal.signal(signal.SIGINT, lambda s, f: shutdown())
     signal.signal(signal.SIGTERM, lambda s, f: shutdown())
 
@@ -90,6 +98,7 @@ def cmd_start(args):
             if (collector.active_session
                     and collector.active_session._stop_requested):
                 collector.stop()
+                _remove_pid()
             time.sleep(0.5)
     except KeyboardInterrupt:
         shutdown()
@@ -146,12 +155,29 @@ def cmd_config_set(args):
 
 
 def cmd_info(args):
+    from .config import load_config
+    config = load_config()
+    sc = config["capture"]["screenshot"]
+
     print("CUA Dataset Collector v0.1.0")
+    print()
+    print("Current config:")
+    print(f"  Screenshot format: {sc.get('format', 'png')} "
+          f"(quality: {sc.get('jpeg_quality', 85)})")
+    print(f"  Capture interval: {sc.get('interval_seconds', 1.0)}s")
+    print(f"  Max width: {sc.get('max_width', 1280)}px")
+    print(f"  Max screenshots: {sc.get('max_screenshots', 50000)}")
+    print(f"  Max duration: {config['session']['max_duration_minutes']} min")
+    print(f"  A11y tree depth: {config['capture']['accessibility_tree']['max_depth']}")
+    print(f"  Mouse move sample rate: {config['capture']['input_monitor']['mouse_move_sample_rate']}")
+    print()
+    print("Storage estimate: ~3.5 GB/hour (PNG at 1fps, 1280px)")
+    print(f"  Data stored at: {Path.home() / '.cua-collector' / 'sessions'}")
     print()
     print("Privacy notice:")
     print("  This tool records screenshots, accessibility trees,")
     print("  mouse/keyboard events, and active window info.")
-    print(f"  Data is stored locally at: {Path.home() / '.cua-collector' / 'sessions'}")
+    print("  Privacy scrubbing enabled by default (CC, email, SSN redaction).")
     print()
     print("Permissions required:")
     print("  - Screen Recording (System Settings > Privacy > Screen Recording)")

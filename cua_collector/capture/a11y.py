@@ -4,11 +4,14 @@ import threading
 import time
 from typing import Optional, Callable
 
+import ApplicationServices as ax
 from ..models import make_observation, CaptureEvent
 
 logger = logging.getLogger(__name__)
 
 _TREE_FINGERPRINT_BYTES = 10000
+_AX_TIMEOUT = 2.0
+_AX_RETRIES = 3
 
 
 class AccessibilityCapture:
@@ -30,6 +33,10 @@ class AccessibilityCapture:
         self._thread = threading.Thread(target=self._a11y_loop, daemon=True)
         self._thread.name = "cua-a11y-capture"
         self._thread.start()
+
+        ax.AXUIElementSetMessagingTimeout(
+            ax.AXUIElementCreateSystemWide(), _AX_TIMEOUT
+        )
 
     def stop(self):
         self._running = False
@@ -73,26 +80,53 @@ class AccessibilityCapture:
         return hashlib.md5(truncated, usedforsecurity=False).hexdigest()
 
     def _capture_tree(self) -> Optional[dict]:
+        for attempt in range(_AX_RETRIES):
+            try:
+                system_wide = ax.AXUIElementCreateSystemWide()
+                ax.AXUIElementSetMessagingTimeout(system_wide, _AX_TIMEOUT)
+                err, focused_app = ax.AXUIElementCopyAttributeValue(
+                    system_wide, ax.kAXFocusedApplicationAttribute, None
+                )
+                if err or focused_app is None:
+                    if attempt == _AX_RETRIES - 1:
+                        return None
+                    time.sleep(1)
+                    continue
+
+                ax.AXUIElementSetMessagingTimeout(focused_app, _AX_TIMEOUT)
+                return self._get_element_info(focused_app, depth=0)
+            except Exception:
+                if attempt == _AX_RETRIES - 1:
+                    self._check_tcc_staleness()
+                    return None
+                time.sleep(1)
+
+    def _check_tcc_staleness(self):
         try:
-            import ApplicationServices as ax
             system_wide = ax.AXUIElementCreateSystemWide()
-            err, focused_app = ax.AXUIElementCopyAttributeValue(
+            ax.AXUIElementSetMessagingTimeout(system_wide, 0.5)
+            err, _ = ax.AXUIElementCopyAttributeValue(
                 system_wide, ax.kAXFocusedApplicationAttribute, None
             )
-            if err or focused_app is None:
-                return None
-
-            return self._get_element_info(focused_app, depth=0)
+            if err:
+                logger.error(
+                    "AX API calls persistently failing with error %d — "
+                    "TCC cache may be stale. Restart the collector to resolve. "
+                    "Try toggling Accessibility permission in System Settings.",
+                    err,
+                )
+            else:
+                logger.debug(
+                    "AX API transient failure resolved on retry"
+                )
         except Exception:
-            logger.exception("a11y tree capture failed")
-            return None
+            pass
 
     def _get_element_info(self, element, depth=0) -> Optional[dict]:
         max_depth = self.config.get("max_depth", 5)
         if depth > max_depth:
             return None
 
-        import ApplicationServices as ax
         info = {}
         try:
             err, role = ax.AXUIElementCopyAttributeValue(element, "AXRole", None)

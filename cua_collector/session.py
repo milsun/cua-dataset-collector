@@ -8,6 +8,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+import AppKit
+import Quartz
+
 from .config import load_config
 from .models import CaptureEvent, make_system_event, SystemEventType
 from .storage.writer import AsyncWriter
@@ -21,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 _MIN_DISK_GB = 1.0
 _WATCHDOG_INTERVAL = 5.0
+_TRAJECTORY_STEP_INTERVAL = 30
+_INPUT_HEALTH_TIMEOUT = 30
+_THERMAL_CHECK_INTERVAL = 60
 
 
 class Session:
@@ -28,6 +34,7 @@ class Session:
         self.config = config
         self.session_id = str(uuid.uuid4())
         self.session_dir = self._create_session_dir()
+        self._exclude_from_backup()
         max_qs = config.get("storage", {}).get("max_queue_size", 10000)
         self.writer = AsyncWriter(self.session_dir, max_queue_size=max_qs)
         self.scrubber = PrivacyScrubber(config)
@@ -38,6 +45,11 @@ class Session:
         self._latest_a11y_tree = None
         self._start_time = 0.0
         self._watchdog_stop = threading.Event()
+        self._app_nap_activity = None
+        self._sleep_observer = None
+        self._wake_observer = None
+        self._last_step_time = 0.0
+        self._last_thermal_check = 0.0
 
         self._capture_modules: list = []
         self._module_threads: dict[str, Optional[threading.Thread]] = {
@@ -56,6 +68,140 @@ class Session:
             .get("max_screenshots", 50000)
         )
         self._stop_requested = False
+        self._display_size = self._get_display_size()
+
+    @staticmethod
+    def _get_display_size() -> dict:
+        try:
+            main_id = Quartz.CGMainDisplayID()
+            w = Quartz.CGDisplayPixelsWide(main_id)
+            h = Quartz.CGDisplayPixelsHigh(main_id)
+            return {"width": w, "height": h}
+        except Exception:
+            logger.warning("failed to get display size")
+            return {"width": 0, "height": 0}
+
+    def _prevent_app_nap(self):
+        try:
+            self._app_nap_activity = AppKit.NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                AppKit.NSActivityUserInitiated
+                | AppKit.NSActivityIdleSystemSleepDisabled
+                | AppKit.NSActivitySuddenTerminationDisabled
+                | AppKit.NSActivityAutomaticTerminationDisabled,
+                "CUA data collection session",
+            )
+            logger.debug("App Nap prevention enabled")
+        except Exception:
+            logger.warning("failed to disable App Nap")
+
+    def _stop_app_nap(self):
+        if self._app_nap_activity is not None:
+            try:
+                AppKit.NSProcessInfo.processInfo().endActivity_(self._app_nap_activity)
+                self._app_nap_activity = None
+            except Exception:
+                pass
+
+    def _register_sleep_wake(self):
+        nc = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
+        self._sleep_observer = nc.addObserverForName_object_queue_usingBlock_(
+            AppKit.NSWorkspaceWillSleepNotification,
+            None, None,
+            lambda note: self._on_sleep(),
+        )
+        self._wake_observer = nc.addObserverForName_object_queue_usingBlock_(
+            AppKit.NSWorkspaceDidWakeNotification,
+            None, None,
+            lambda note: self._on_wake(),
+        )
+
+    def _unregister_sleep_wake(self):
+        nc = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
+        if self._sleep_observer is not None:
+            nc.removeObserver_(self._sleep_observer)
+            self._sleep_observer = None
+        if self._wake_observer is not None:
+            nc.removeObserver_(self._wake_observer)
+            self._wake_observer = None
+
+    def _on_sleep(self):
+        if not self._running:
+            return
+        logger.info("System sleeping, pausing capture")
+        self._paused = True
+        self._write_system_event(SystemEventType.PAUSED, {
+            "reason": "system_sleep",
+        })
+
+    def _on_wake(self):
+        if not self._running:
+            return
+        logger.info("System woke from sleep, resuming capture")
+        self._paused = False
+        self._write_system_event(SystemEventType.RESUMED, {
+            "reason": "system_wake",
+        })
+        self._last_step_time = time.time()
+
+    def _emit_step_marker(self):
+        now = time.time()
+        elapsed = now - self._start_time
+        if now - self._last_step_time >= _TRAJECTORY_STEP_INTERVAL:
+            self._last_step_time = now
+            self._write_system_event(SystemEventType.STEP_MARKER, {
+                "step_number": self.writer.event_count,
+                "elapsed_seconds": round(elapsed, 1),
+            })
+
+    def _check_thermal_state(self):
+        now = time.time()
+        if now - self._last_thermal_check < _THERMAL_CHECK_INTERVAL:
+            return
+        self._last_thermal_check = now
+        try:
+            state = AppKit.NSProcessInfo.processInfo().thermalState()
+            if state == AppKit.NSProcessInfoThermalStateCritical:
+                logger.warning("System thermal state is CRITICAL — performance may degrade")
+            elif state == AppKit.NSProcessInfoThermalStateSerious:
+                logger.warning("System thermal state is SERIOUS — consider reducing workload")
+        except Exception:
+            pass
+
+    def _check_input_health(self):
+        input_mon = None
+        for mod in self._capture_modules:
+            if isinstance(mod, InputMonitor):
+                input_mon = mod
+                break
+        if input_mon is None:
+            return
+        since = input_mon.seconds_since_last_event
+        if since > _INPUT_HEALTH_TIMEOUT:
+            logger.warning(
+                "No input events for %.0f seconds — event tap may be dead. "
+                "Check Input Monitoring permission.",
+                since,
+            )
+
+    def _exclude_from_backup(self):
+        try:
+            import Quartz
+            url = Quartz.CFURLCreateFromFileSystemRepresentation(
+                None, str(self.session_dir).encode("utf-8"), len(str(self.session_dir)), True
+            )
+            if url:
+                Quartz.CFURLSetResourcePropertyForKey(
+                    url, Quartz.kCFURLIsExcludedFromBackupKey, Quartz.kCFBooleanTrue, None
+                )
+        except Exception:
+            pass
+
+    def _clear_spotlight(self):
+        try:
+            metadata_path = self.session_dir / ".metadata_never_index"
+            metadata_path.touch(exist_ok=True)
+        except Exception:
+            pass
 
     def _create_session_dir(self) -> Path:
         base = Path(self.config["storage"]["dir"]).expanduser()
@@ -84,12 +230,21 @@ class Session:
         if not self._check_disk_space():
             raise RuntimeError("insufficient disk space to start session")
 
+        self._prevent_app_nap()
+        self._register_sleep_wake()
+        self._clear_spotlight()
         self.writer.open()
         self._running = True
         self._start_time = time.time()
+        self._last_step_time = self._start_time
+
+        self.writer.on_rotate(lambda old, new: logger.info(
+            "JSONL rotated: %s -> %s", old, new
+        ))
 
         self._write_system_event(SystemEventType.SESSION_START, {
             "config": {k: v for k, v in self.config.items() if k != "storage"},
+            "display_size": self._display_size,
         })
         logger.info("Session %s started at %s", self.session_id[:8], self.session_dir)
 
@@ -142,6 +297,7 @@ class Session:
         logger.info("Stopping session %s ...", self.session_id[:8])
         self._running = False
         self._watchdog_stop.set()
+        self._unregister_sleep_wake()
 
         for mod in reversed(self._capture_modules):
             try:
@@ -162,6 +318,7 @@ class Session:
         if remaining > 0:
             logger.debug("Draining %d remaining events from queue", remaining)
         self.writer.close()
+        self._stop_app_nap()
 
         logger.info(
             "Session %s ended: %d events written, %d screenshots, %d dropped",
@@ -207,6 +364,10 @@ class Session:
                     qsize, max_qs,
                 )
 
+            self._emit_step_marker()
+            self._check_thermal_state()
+            self._check_input_health()
+
             self._watchdog_stop.wait(_WATCHDOG_INTERVAL)
 
     @property
@@ -245,6 +406,7 @@ class Session:
                     )
                     self._stop_requested = True
                     return
+                event.data["display_size"] = self._display_size
                 tree = self._latest_a11y_tree
                 if tree is None:
                     fallback = self._a11y.capture_now()

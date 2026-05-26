@@ -73,10 +73,20 @@ class ScreenCapture:
                 cg_image = _scale_cgimage(cg_image, new_w, new_h)
 
             rep = AppKit.NSBitmapImageRep.alloc().initWithCGImage_(cg_image)
-            png_data = rep.representationUsingType_properties_(
-                AppKit.NSPNGFileType, None
-            )
-            screenshot_rel_path = self.save_screenshot(bytes(png_data))
+            fmt = self.config.get("format", "jpeg")
+            if fmt == "jpeg":
+                quality = self.config.get("jpeg_quality", 85)
+                image_data = rep.representationUsingType_properties_(
+                    AppKit.NSJPEGFileType,
+                    {AppKit.NSImageCompressionFactor: quality / 100.0},
+                )
+                ext = "jpg"
+            else:
+                image_data = rep.representationUsingType_properties_(
+                    AppKit.NSPNGFileType, None
+                )
+                ext = "png"
+            screenshot_rel_path = self.save_screenshot(bytes(image_data), ext)
 
             timestamp = time.time()
             return make_observation(

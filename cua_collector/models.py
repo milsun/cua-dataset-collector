@@ -29,6 +29,8 @@ class SystemEventType(str, Enum):
     APP_QUIT = "app_quit"
     PAUSED = "paused"
     RESUMED = "resumed"
+    STEP_MARKER = "step_marker"
+    JSONL_ROTATED = "jsonl_rotated"
 
 
 @dataclass
@@ -58,6 +60,7 @@ def make_observation(
     accessibility_tree: Optional[dict] = None,
     active_window: Optional[dict] = None,
     app_activity: Optional[list] = None,
+    display_size: Optional[dict] = None,
 ) -> CaptureEvent:
     data = {}
     if screenshot_path:
@@ -68,6 +71,8 @@ def make_observation(
         data["active_window"] = active_window
     if app_activity:
         data["app_activity"] = app_activity
+    if display_size:
+        data["display_size"] = display_size
     return CaptureEvent(
         event_type=EventType.OBSERVATION,
         timestamp=timestamp,

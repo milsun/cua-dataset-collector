@@ -1,1 +1,1 @@
-pyobjc>=10.2
+pyobjc>=12.1

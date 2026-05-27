@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CUA Dataset Viewer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">CUA Dataset Viewer</div>
+    <nav>
+      <select id="session-select" onchange="loadSession(this.value)">
+        <option value="">-- Select a session --</option>
+      </select>
+      <span class="sep">|</span>
+      <button onclick="togglePlay()" id="play-btn" title="Play/pause auto-advance">▶</button>
+      <label class="speed-label">
+        Speed:
+        <select id="speed-select" onchange="setPlaybackSpeed()">
+          <option value="500">0.5s</option>
+          <option value="1000">1s</option>
+          <option value="1500" selected>1.5s</option>
+          <option value="3000">3s</option>
+          <option value="5000">5s</option>
+        </select>
+      </label>
+      <span class="sep">|</span>
+      <label>Filter:
+        <select id="filter-type" onchange="applyFilter()">
+          <option value="">All</option>
+          <option value="observation">Observations</option>
+          <option value="action">Actions</option>
+          <option value="system_event">System Events</option>
+        </select>
+      </label>
+      <label>Search:
+        <input id="search-input" type="text" placeholder="Search events..." oninput="debounceSearch()">
+      </label>
+    </nav>
+  </header>
+
+  <div id="main">
+    <aside id="sidebar">
+      <div id="session-info"></div>
+      <div id="stats-panel"></div>
+      <div id="export-section">
+        <button onclick="exportLabeled()" id="export-btn" style="display:none">Export Labeled JSONL</button>
+        <button onclick="exportStats()" id="export-stats-btn" style="display:none">Export Summary Report</button>
+      </div>
+      <div id="delete-section">
+        <button onclick="deleteSession()" id="delete-btn" style="display:none" class="danger">Delete Session</button>
+      </div>
+    </aside>
+
+    <section id="viewer">
+      <div id="welcome">
+        <h2>CUA Dataset Viewer</h2>
+        <p>Select a session from the dropdown to begin browsing.</p>
+        <p>Navigate through captured events, view screenshots with accessibility tree overlays, and add labels for training.</p>
+      </div>
+
+      <div id="screenshot-container" style="display:none">
+        <div class="screenshot-wrapper" id="screenshot-wrapper">
+          <img id="screenshot-img" alt="Screenshot">
+          <div id="a11y-overlay"></div>
+        </div>
+        <div class="screenshot-controls">
+          <button onclick="firstEvent()" id="first-btn" title="First event">⏮</button>
+          <button onclick="prevEvent()" id="prev-btn" title="Previous event">◀</button>
+          <span id="event-counter">0 / 0</span>
+          <button onclick="nextEvent()" id="next-btn" title="Next event">▶</button>
+          <button onclick="lastEvent()" id="last-btn" title="Last event">⏭</button>
+          <label class="goto-label">
+            Go to:
+            <input id="goto-input" type="number" min="1" placeholder="#" onkeydown="gotoEvent(event)">
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="a11y-toggle" onchange="toggleOverlay()" checked>
+            A11y
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="bbox-toggle" onchange="toggleBBoxes()" checked>
+            BBox
+          </label>
+          <button onclick="downloadScreenshot()" id="dl-btn" title="Download screenshot">⬇</button>
+        </div>
+      </div>
+
+      <div id="timeline-container" style="display:none">
+        <div class="timeline-legend">
+          <span class="dot obs">Observation</span>
+          <span class="dot act">Action</span>
+          <span class="dot sys">System</span>
+          <span class="dot lbl">Labeled</span>
+        </div>
+        <div id="timeline" onmousedown="timelineClick(event)" onmousemove="timelineHover(event)">
+          <div id="timeline-track"></div>
+          <div id="timeline-scrubber"></div>
+        </div>
+      </div>
+
+      <div id="zoom-controls" style="display:none">
+        <button onclick="zoomOut()" title="Zoom out">🔍−</button>
+        <span id="zoom-level">100%</span>
+        <button onclick="zoomIn()" title="Zoom in">🔍+</button>
+        <button onclick="zoomReset()" title="Reset zoom">↺</button>
+      </div>
+    </section>
+
+    <aside id="detail-panel">
+      <div id="detail-content" style="display:none">
+        <h3>Event Details</h3>
+        <div id="detail-type"></div>
+        <div id="detail-meta"></div>
+        <div id="detail-a11y-tree" style="display:none">
+          <h3>Accessibility Tree</h3>
+          <div id="a11y-tree-view"></div>
+        </div>
+        <h3>Raw Data</h3>
+        <pre id="detail-data"></pre>
+
+        <h3>Labels</h3>
+        <div class="label-field">
+          <label>Tag:</label>
+          <select id="label-tag">
+            <option value="">--</option>
+            <option value="correct">Correct</option>
+            <option value="incorrect">Incorrect</option>
+            <option value="ambiguous">Ambiguous</option>
+            <option value="error">Error State</option>
+            <option value="task_start">Task Start</option>
+            <option value="task_end">Task End</option>
+          </select>
+        </div>
+        <div class="label-field">
+          <label>Action Class:</label>
+          <select id="label-action-class">
+            <option value="">--</option>
+            <option value="navigate">Navigate</option>
+            <option value="select">Select</option>
+            <option value="type">Type</option>
+            <option value="scroll">Scroll</option>
+            <option value="observe">Observe</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div class="label-field">
+          <label>Notes:</label>
+          <textarea id="label-notes" rows="3" placeholder="Add notes about this event..."></textarea>
+        </div>
+        <button onclick="saveLabel()" id="save-label-btn">Save Label</button>
+        <button onclick="clearLabel()" id="clear-label-btn" class="secondary">Clear</button>
+        <div id="label-status"></div>
+      </div>
+      <div id="detail-empty">
+        <p>Select an event to view details and add labels.</p>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -154,6 +154,16 @@ def cmd_config_set(args):
         sys.exit(1)
 
 
+def cmd_ui(args):
+    _setup_logging(args.log_level)
+    try:
+        from .ui.server import run_ui
+    except ImportError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    run_ui(host=args.host, port=args.port, debug=False, open_browser=not args.no_browser)
+
+
 def cmd_info(args):
     from .config import load_config
     config = load_config()
@@ -204,6 +214,11 @@ def main():
     sub.add_parser("status", help="Show current recording status")
     sub.add_parser("info", help="Show info and quick start guide")
 
+    ui_parser = sub.add_parser("ui", help="Launch the dataset viewer UI")
+    ui_parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+    ui_parser.add_argument("--port", type=int, default=8899, help="Port to bind to (default: 8899)")
+    ui_parser.add_argument("--no-browser", action="store_true", help="Don't open browser automatically")
+
     config_parser = sub.add_parser("config", help="Manage configuration")
     config_sub = config_parser.add_subparsers(dest="config_command")
 
@@ -220,6 +235,8 @@ def main():
         cmd_status(args)
     elif args.command == "info":
         cmd_info(args)
+    elif args.command == "ui":
+        cmd_ui(args)
     elif args.command == "config":
         if args.config_command == "show":
             cmd_config_show(args)

@@ -5,6 +5,8 @@ import time
 from typing import Optional, Callable
 
 import AppKit
+import objc
+import Quartz
 from ..models import make_action, ActionType, CaptureEvent
 
 logger = logging.getLogger(__name__)
@@ -86,8 +88,6 @@ class InputMonitor:
         return time.time() - self._last_event_time
 
     def _create_tap(self):
-        import Quartz
-
         event_mask = 0
         event_mask |= Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
         event_mask |= Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseUp)
@@ -121,8 +121,6 @@ class InputMonitor:
         return tap
 
     def _run_event_tap(self):
-        import Quartz
-
         self._tap = self._create_tap()
         if self._tap is None:
             return
@@ -146,7 +144,6 @@ class InputMonitor:
 
     def _handle_wake(self):
         logger.info("System woke from sleep, re-creating event tap")
-        import Quartz
         if self._tap is not None:
             Quartz.CFRunLoopRemoveSource(
                 self._run_loop_ref,
@@ -163,9 +160,7 @@ class InputMonitor:
             )
 
     def _handle_event(self, proxy, event_type, event, user_info):
-        import objc
         with objc.autorelease_pool():
-            import Quartz
             disabled_by_timeout = getattr(Quartz, 'kCGEventTapDisabledByTimeout', 0xFFFFFFFE)
             disabled_by_input = getattr(Quartz, 'kCGEventTapDisabledByUserInput', 0xFFFFFFFF)
 
@@ -322,7 +317,6 @@ class InputMonitor:
         ))
 
     def _get_modifiers(self, event):
-        import Quartz
         flags = Quartz.CGEventGetFlags(event)
         mods = []
         if flags & 1 << 20:

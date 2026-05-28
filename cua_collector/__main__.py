@@ -1,5 +1,6 @@
 import argparse
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -28,11 +29,27 @@ _LOG_LEVELS = {
 
 
 def _setup_logging(level: str = "INFO"):
-    logging.basicConfig(
-        level=_LOG_LEVELS.get(level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    log_dir = Path.home() / ".cua-collector" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = str(log_dir / "collector.log")
+
+    root = logging.getLogger()
+    root.setLevel(_LOG_LEVELS.get(level.upper(), logging.INFO))
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=50 * 1024 * 1024, backupCount=3,
+    )
+    handler.setFormatter(fmt)
+    root.addHandler(handler)
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
 
 
 def _write_pid():
@@ -176,13 +193,16 @@ def cmd_info(args):
           f"(quality: {sc.get('jpeg_quality', 85)})")
     print(f"  Capture interval: {sc.get('interval_seconds', 1.0)}s")
     print(f"  Max width: {sc.get('max_width', 1280)}px")
-    print(f"  Max screenshots: {sc.get('max_screenshots', 50000)}")
-    print(f"  Max duration: {config['session']['max_duration_minutes']} min")
+    max_ss = sc.get('max_screenshots', 0)
+    print(f"  Max screenshots: {'unlimited' if max_ss == 0 else max_ss}")
+    max_dur = config['session']['max_duration_minutes']
+    print(f"  Max duration: {'unlimited' if max_dur == 0 else f'{max_dur} min'}")
     print(f"  A11y tree depth: {config['capture']['accessibility_tree']['max_depth']}")
     print(f"  Mouse move sample rate: {config['capture']['input_monitor']['mouse_move_sample_rate']}")
     print()
     print("Storage estimate: ~3.5 GB/hour (PNG at 1fps, 1280px)")
     print(f"  Data stored at: {Path.home() / '.cua-collector' / 'sessions'}")
+    print(f"  Logs: {Path.home() / '.cua-collector' / 'logs' / 'collector.log'}")
     print()
     print("Privacy notice:")
     print("  This tool records screenshots, accessibility trees,")

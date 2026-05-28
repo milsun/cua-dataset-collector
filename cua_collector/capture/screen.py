@@ -4,6 +4,7 @@ import threading
 from typing import Optional, Callable
 
 import AppKit
+import objc
 import Quartz
 
 from ..models import make_observation, CaptureEvent
@@ -35,7 +36,6 @@ class ScreenCapture:
 
     def _capture_loop(self):
         while self._running:
-            import objc
             with objc.autorelease_pool():
                 start = time.time()
                 try:

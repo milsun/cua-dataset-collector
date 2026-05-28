@@ -13,14 +13,14 @@ DEFAULT_CONFIG = {
     },
     "session": {
         "auto_start": True,
-        "max_duration_minutes": 120,
+        "max_duration_minutes": 0,
     },
     "capture": {
         "screenshot": {
             "enabled": True,
             "interval_seconds": 1.0,
             "max_width": 1280,
-            "max_screenshots": 50000,
+            "max_screenshots": 0,
             "format": "png",
             "jpeg_quality": 85,
         },
@@ -77,9 +77,9 @@ def _validate_config(config: dict):
     if not isinstance(interval, (int, float)) or interval < 0.1:
         errors.append("capture.screenshot.interval_seconds must be >= 0.1")
 
-    max_ss = sc.get("max_screenshots", 50000)
-    if not isinstance(max_ss, int) or max_ss < 100:
-        errors.append("capture.screenshot.max_screenshots must be >= 100")
+    max_ss = sc.get("max_screenshots", 0)
+    if not isinstance(max_ss, int) or max_ss < 0:
+        errors.append("capture.screenshot.max_screenshots must be >= 0 (0 = unlimited)")
 
     fmt = sc.get("format", "png")
     if fmt not in ("png", "jpeg"):
@@ -104,9 +104,9 @@ def _validate_config(config: dict):
         errors.append("capture.input_monitor.mouse_move_sample_rate must be 0.0-1.0")
 
     sess = config.get("session", {})
-    dur = sess.get("max_duration_minutes", 120)
-    if not isinstance(dur, (int, float)) or dur < 1:
-        errors.append("session.max_duration_minutes must be >= 1")
+    dur = sess.get("max_duration_minutes", 0)
+    if not isinstance(dur, (int, float)) or dur < 0:
+        errors.append("session.max_duration_minutes must be >= 0 (0 = unlimited)")
 
     storage = config.get("storage", {})
     gb = storage.get("max_sessions_gb", 50)

@@ -5,6 +5,7 @@ import time
 from typing import Optional, Callable
 
 import ApplicationServices as ax
+import objc
 from ..models import make_observation, CaptureEvent
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class AccessibilityCapture:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._last_tree_hash = 0
+        self._tcc_throttle_count = 0
 
     def start(self):
         if not self.config["enabled"]:
@@ -45,7 +47,6 @@ class AccessibilityCapture:
 
     def _a11y_loop(self):
         while self._running:
-            import objc
             with objc.autorelease_pool():
                 try:
                     tree = self._capture_tree()
@@ -102,6 +103,9 @@ class AccessibilityCapture:
                 time.sleep(1)
 
     def _check_tcc_staleness(self):
+        self._tcc_throttle_count += 1
+        if self._tcc_throttle_count % 60 != 1:
+            return
         try:
             system_wide = ax.AXUIElementCreateSystemWide()
             ax.AXUIElementSetMessagingTimeout(system_wide, 0.5)
@@ -116,9 +120,7 @@ class AccessibilityCapture:
                     err,
                 )
             else:
-                logger.debug(
-                    "AX API transient failure resolved on retry"
-                )
+                logger.debug("AX API transient failure resolved")
         except Exception:
             pass
 

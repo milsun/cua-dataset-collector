@@ -1,3 +1,4 @@
+import gc
 import logging
 import os
 import shutil
@@ -27,6 +28,8 @@ _WATCHDOG_INTERVAL = 5.0
 _TRAJECTORY_STEP_INTERVAL = 30
 _INPUT_HEALTH_TIMEOUT = 30
 _THERMAL_CHECK_INTERVAL = 60
+_HEALTH_LOG_INTERVAL = 300
+_GC_INTERVAL = 600
 
 
 class Session:
@@ -50,6 +53,8 @@ class Session:
         self._wake_observer = None
         self._last_step_time = 0.0
         self._last_thermal_check = 0.0
+        self._last_health_log = 0.0
+        self._last_gc_time = 0.0
 
         self._capture_modules: list = []
         self._module_threads: dict[str, Optional[threading.Thread]] = {
@@ -65,7 +70,7 @@ class Session:
         self._max_screenshots = (
             config.get("capture", {})
             .get("screenshot", {})
-            .get("max_screenshots", 50000)
+            .get("max_screenshots", 0)
         )
         self._stop_requested = False
         self._display_size = self._get_display_size()
@@ -188,9 +193,42 @@ class Session:
                 since,
             )
 
+    def _maybe_log_health_summary(self):
+        now = time.time()
+        if now - self._last_health_log < _HEALTH_LOG_INTERVAL:
+            return
+        self._last_health_log = now
+        elapsed = now - self._start_time
+        total = self._sequence_counter
+        written = self.writer.event_count
+        dropped = self.writer.dropped_count
+        qsize = self.writer._queue.qsize()
+        max_qs = self.config.get("storage", {}).get("max_queue_size", 10000)
+        screenshots = self.writer.screenshot_count
+        rate = total / elapsed if elapsed > 0 else 0
+        logger.info(
+            "Health — elapsed=%.0fm events=%d written=%d dropped=%d "
+            "queue=%d/%d screenshots=%d rate=%.1f ev/s",
+            elapsed / 60, total, written, dropped,
+            qsize, max_qs, screenshots, rate,
+        )
+
+    def _maybe_gc(self):
+        now = time.time()
+        if now - self._last_gc_time < _GC_INTERVAL:
+            return
+        self._last_gc_time = now
+        before = gc.get_count()
+        collected = gc.collect()
+        after = gc.get_count()
+        if collected > 0:
+            logger.debug(
+                "GC collected %d objects (gen counts before=%s after=%s)",
+                collected, before, after,
+            )
+
     def _exclude_from_backup(self):
         try:
-            import Quartz
             url = Quartz.CFURLCreateFromFileSystemRepresentation(
                 None, str(self.session_dir).encode("utf-8"), len(str(self.session_dir)), True
             )
@@ -319,9 +357,6 @@ class Session:
             "events_dropped": dropped if dropped else 0,
         })
 
-        remaining = self.writer._queue.qsize()
-        if remaining > 0:
-            logger.debug("Draining %d remaining events from queue", remaining)
         self.writer.close()
         self._stop_app_nap()
 
@@ -372,6 +407,8 @@ class Session:
             self._emit_step_marker()
             self._check_thermal_state()
             self._check_input_health()
+            self._maybe_log_health_summary()
+            self._maybe_gc()
 
             self._watchdog_stop.wait(_WATCHDOG_INTERVAL)
 

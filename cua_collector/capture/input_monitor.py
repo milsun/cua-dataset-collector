@@ -180,7 +180,9 @@ class InputMonitor:
             if not self._running:
                 return event
 
-            self._last_event_time = time.time()
+            now = time.time()
+            timestamp = now
+            self._last_event_time = now
             event_type_name = Quartz.CGEventGetType(event)
 
             try:

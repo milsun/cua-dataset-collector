@@ -76,10 +76,15 @@ class Session:
             main_id = Quartz.CGMainDisplayID()
             w = Quartz.CGDisplayPixelsWide(main_id)
             h = Quartz.CGDisplayPixelsHigh(main_id)
-            return {"width": w, "height": h}
+            scale = 1.0
+            try:
+                scale = AppKit.NSScreen.mainScreen().backingScaleFactor() or 1.0
+            except Exception:
+                pass
+            return {"width": w, "height": h, "scale": scale}
         except Exception:
             logger.warning("failed to get display size")
-            return {"width": 0, "height": 0}
+            return {"width": 0, "height": 0, "scale": 1.0}
 
     def _prevent_app_nap(self):
         try:
